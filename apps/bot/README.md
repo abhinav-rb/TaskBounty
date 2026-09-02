@@ -52,8 +52,17 @@ Approver:  /newtask Make bed | 2 | 0 8 * * * | Neat, corners tucked
 
 ## Commands
 
-**Doer (User 1)** — `/tasks`, `/balance`, `/cashout [amount]`, `/receipts`, and
-just **send a photo** to submit proof.
+**Doer (User 1)** — `/tasks`, `/balance`, `/cashout [amount]`, `/receipts`,
+`/appraise`, and just **send a photo** to submit proof.
+
+**Appraisals** — the Doer can also propose a task the Approver *didn't* assign:
+
+```
+Doer:      /appraise Cleaned the garage | 20 | Swept + organized
+Doer:      (sends the photo proof)
+Approver:  gets an "Appraisal request" with the proposed value + Accept/Decline
+           Accept → $20 credited   ·   Decline → declined (with an optional reason)
+```
 
 **Approver (User 2)** — `/newtask`, `/assignnow`, `/templates`, `/assign <id>`,
 `/pause <id>`, `/resume <id>`, and **Accept/Reject** buttons on each submission.

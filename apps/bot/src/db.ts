@@ -10,6 +10,7 @@ import type {
   Role,
   Submission,
   TaskInstance,
+  TaskKind,
   TaskStatus,
   TaskTemplate,
 } from "./types.js";
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS task_templates (
 CREATE TABLE IF NOT EXISTS task_instances (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   template_id      INTEGER REFERENCES task_templates(id),
+  kind             TEXT NOT NULL DEFAULT 'assigned',
   title            TEXT NOT NULL,
   description      TEXT,
   amount_cents     INTEGER NOT NULL,
@@ -97,6 +99,25 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** Idempotent upgrades for databases created by earlier versions. */
+  private migrate(): void {
+    this.ensureColumn(
+      "task_instances",
+      "kind",
+      "TEXT NOT NULL DEFAULT 'assigned'",
+    );
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const cols = this.db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    }
   }
 
   // ---- profiles ----------------------------------------------------------
@@ -213,6 +234,7 @@ export class Store {
 
   createInstance(i: {
     template_id: number | null;
+    kind?: TaskKind;
     title: string;
     description: string | null;
     amount_cents: number;
@@ -223,11 +245,12 @@ export class Store {
     const info = this.db
       .prepare(
         `INSERT INTO task_instances
-           (template_id, title, description, amount_cents, assignee_id, approver_id, due_at, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'assigned', ?)`,
+           (template_id, kind, title, description, amount_cents, assignee_id, approver_id, due_at, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'assigned', ?)`,
       )
       .run(
         i.template_id,
+        i.kind ?? "assigned",
         i.title,
         i.description,
         i.amount_cents,

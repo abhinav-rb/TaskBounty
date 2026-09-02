@@ -1,7 +1,12 @@
 // Pure domain logic. No I/O, no database, no Telegram — everything here is a
 // plain function so it can be unit-tested in isolation (see test/domain.test.ts).
 
-import type { LedgerType, ReviewDecision, TaskStatus } from "./types.js";
+import type {
+  LedgerType,
+  ReviewDecision,
+  TaskKind,
+  TaskStatus,
+} from "./types.js";
 
 /** Sum a set of ledger amounts (in cents). Balance = earnings + (negative) cash-outs. */
 export function computeBalanceCents(
@@ -41,9 +46,17 @@ export function canReview(status: TaskStatus): boolean {
   return status === "submitted";
 }
 
-/** Resulting task status after an approver decision. */
-export function statusAfterReview(decision: ReviewDecision): TaskStatus {
-  return decision === "approved" ? "approved" : "assigned";
+/**
+ * Resulting task status after an approver decision.
+ * A rejected *assigned* task returns to the Doer for a redo; a rejected
+ * *appraisal* (doer-proposed) is declined outright and is terminal.
+ */
+export function statusAfterReview(
+  decision: ReviewDecision,
+  kind: TaskKind,
+): TaskStatus {
+  if (decision === "approved") return "approved";
+  return kind === "appraisal" ? "rejected" : "assigned";
 }
 
 /** The ledger effect of a review: only approvals move money. */
