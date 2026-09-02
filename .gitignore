@@ -18,3 +18,10 @@ apps/desktop/src-tauri/target/
 *.log
 .idea/
 .vscode/
+
+# Bot runtime data (SQLite db + downloaded proof photos)
+data/
+apps/*/data/
+*.db
+*.db-wal
+*.db-shm
