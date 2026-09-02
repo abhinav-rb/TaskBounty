@@ -50,8 +50,12 @@ test("status transition helpers", () => {
   assert.equal(canSubmit("submitted"), false);
   assert.equal(canReview("submitted"), true);
   assert.equal(canReview("assigned"), false);
-  assert.equal(statusAfterReview("approved"), "approved");
-  assert.equal(statusAfterReview("rejected"), "assigned");
+  // Assigned tasks: approve -> approved, reject -> back to assigned (redo).
+  assert.equal(statusAfterReview("approved", "assigned"), "approved");
+  assert.equal(statusAfterReview("rejected", "assigned"), "assigned");
+  // Appraisals: approve -> approved, reject -> rejected (terminal, no redo).
+  assert.equal(statusAfterReview("approved", "appraisal"), "approved");
+  assert.equal(statusAfterReview("rejected", "appraisal"), "rejected");
 });
 
 test("only approvals move money", () => {

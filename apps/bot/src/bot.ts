@@ -10,6 +10,7 @@ import {
   canSubmit,
   formatMoney,
   parseAmountToCents,
+  statusAfterReview,
 } from "./domain.js";
 import {
   announceAssignment,
@@ -20,7 +21,7 @@ import {
 } from "./notify.js";
 import { downloadPhoto } from "./photos.js";
 import type { Scheduler } from "./scheduler.js";
-import type { Profile, Role, TaskInstance } from "./types.js";
+import type { Profile, Role, TaskInstance, TaskKind } from "./types.js";
 
 interface Deps {
   store: Store;
@@ -35,6 +36,7 @@ function helpFor(role: Role | undefined): string {
     "/balance — how much you've earned",
     "/cashout [amount] — record a cash-out",
     "/receipts — approved tasks (last 30 days)",
+    "/appraise Title | amount | desc — propose a task you did",
     "",
     "📸 To submit a finished task, just send a photo here.",
   ].join("\n");
@@ -63,7 +65,12 @@ export function registerHandlers(
   const pendingPhoto = new Map<number, { fileId: string; note: string | null }>();
   const pendingReject = new Map<
     number,
-    { reviewId: number; assigneeId: number; title: string }
+    { reviewId: number; assigneeId: number; title: string; kind: TaskKind }
+  >();
+  // A doer-initiated appraisal awaiting its photo.
+  const pendingAppraisal = new Map<
+    number,
+    { title: string; description: string | null; amount_cents: number }
   >();
 
   const senderOf = (ctx: Context): Profile | undefined =>
@@ -128,13 +135,16 @@ export function registerHandlers(
       );
       return;
     }
+    const isAppraisal = inst.kind === "appraisal";
     const caption = [
-      "🆕 Submission for review",
+      isAppraisal
+        ? "💡 Appraisal request (proposed by the Doer)"
+        : "🆕 Submission for review",
       "",
       `#${inst.id} — ${inst.title}`,
       `From: ${doer.display_name ?? (doer.username ? "@" + doer.username : "Doer")}`,
       `When: ${fmtDate(sub.submitted_at, config.tz)}`,
-      `Worth: ${formatMoney(inst.amount_cents, config.currency)}`,
+      `${isAppraisal ? "Proposed value" : "Worth"}: ${formatMoney(inst.amount_cents, config.currency)}`,
       note ? `Note: ${note}` : "",
     ]
       .filter(Boolean)
@@ -469,6 +479,40 @@ export function registerHandlers(
     await ctx.reply(`▶️ Resumed template #${id}.`);
   });
 
+  // ---- appraisal (doer proposes a task) ----------------------------------
+
+  bot.command("appraise", async (ctx) => {
+    const doer = await requireDoer(ctx);
+    if (!doer) return;
+    const parts = ctx.match.split("|").map((s) => s.trim());
+    if (parts.length < 2 || !parts[0]) {
+      await ctx.reply(
+        "Propose a task you've done for the Approver to value.\n\n" +
+          "Format:\n/appraise Title | amount | description(optional)\n\n" +
+          "Example:\n/appraise Cleaned the garage | 20 | Swept + organized\n\n" +
+          "Then send the photo proof and I'll forward it for approval.",
+      );
+      return;
+    }
+    const title = parts[0];
+    const amountStr = parts[1] ?? "";
+    const description = parts[2] || null;
+    let amount_cents: number;
+    try {
+      amount_cents = parseAmountToCents(amountStr);
+    } catch (err) {
+      await ctx.reply((err as Error).message);
+      return;
+    }
+    if (ctx.chat) {
+      pendingAppraisal.set(ctx.chat.id, { title, description, amount_cents });
+    }
+    await ctx.reply(
+      `Got it: "${title}" for ${formatMoney(amount_cents, config.currency)}.\n` +
+        `📸 Now send the photo proof for this appraisal.`,
+    );
+  });
+
   // ---- photo submissions -------------------------------------------------
 
   bot.on("message:photo", async (ctx) => {
@@ -486,6 +530,29 @@ export function registerHandlers(
     if (!largest) return;
     const fileId = largest.file_id;
     const note = ctx.message.caption ?? null;
+
+    // If the Doer just ran /appraise, this photo completes that request.
+    const appraisal = ctx.chat ? pendingAppraisal.get(ctx.chat.id) : undefined;
+    if (appraisal) {
+      if (ctx.chat) pendingAppraisal.delete(ctx.chat.id);
+      const approver = store.getProfileByRole("approver");
+      if (!approver) {
+        await ctx.reply("Setup error: no Approver configured.");
+        return;
+      }
+      const inst = store.createInstance({
+        template_id: null,
+        kind: "appraisal",
+        title: appraisal.title,
+        description: appraisal.description,
+        amount_cents: appraisal.amount_cents,
+        assignee_id: doer.id,
+        approver_id: approver.id,
+        due_at: null,
+      });
+      await doSubmit(ctx, doer, inst, fileId, note);
+      return;
+    }
 
     const open = store.listInstancesForAssignee(doer.id, ["assigned"]);
     if (open.length === 0) {
@@ -555,6 +622,7 @@ export function registerHandlers(
         await ctx.answerCallbackQuery("This task was already handled.");
         return;
       }
+      const isAppraisal = inst.kind === "appraisal";
 
       if (action === "approve") {
         store.createReview({
@@ -563,22 +631,22 @@ export function registerHandlers(
           decision: "approved",
           note: null,
         });
-        store.setInstanceStatus(inst.id, "approved");
+        store.setInstanceStatus(inst.id, statusAfterReview("approved", inst.kind));
         store.addLedgerEntry({
           user_id: inst.assignee_id,
           instance_id: inst.id,
           amount_cents: inst.amount_cents,
           type: "earning",
-          note: `Task #${inst.id}: ${inst.title}`,
+          note: `${isAppraisal ? "Appraisal" : "Task"} #${inst.id}: ${inst.title}`,
         });
         const bal = store.getBalanceCents(inst.assignee_id);
         await ctx.answerCallbackQuery("Approved ✅");
-        await clearButtons(ctx, "✅ Approved");
+        await clearButtons(ctx, isAppraisal ? "💡 Appraisal approved" : "✅ Approved");
         await sendToProfile(
           bot.api,
           store,
           inst.assignee_id,
-          `✅ Approved: "${inst.title}"\n` +
+          `${isAppraisal ? "💡 Appraisal approved" : "✅ Approved"}: "${inst.title}"\n` +
             `+${formatMoney(inst.amount_cents, config.currency)} added.\n` +
             `Balance: ${formatMoney(bal, config.currency)}`,
         );
@@ -589,20 +657,26 @@ export function registerHandlers(
           decision: "rejected",
           note: null,
         });
-        store.setInstanceStatus(inst.id, "assigned");
-        await ctx.answerCallbackQuery("Sent back ↩️");
-        await clearButtons(ctx, "❌ Rejected — sent back to the Doer");
+        store.setInstanceStatus(inst.id, statusAfterReview("rejected", inst.kind));
+        await ctx.answerCallbackQuery(isAppraisal ? "Declined 🚫" : "Sent back ↩️");
+        await clearButtons(
+          ctx,
+          isAppraisal ? "🚫 Declined" : "❌ Rejected — sent back to the Doer",
+        );
         await sendToProfile(
           bot.api,
           store,
           inst.assignee_id,
-          `↩️ "${inst.title}" was sent back. Please redo it and send a new photo.`,
+          isAppraisal
+            ? `🚫 Your appraisal "${inst.title}" was declined.`
+            : `↩️ "${inst.title}" was sent back. Please redo it and send a new photo.`,
         );
         if (ctx.chat) {
           pendingReject.set(ctx.chat.id, {
             reviewId: review.id,
             assigneeId: inst.assignee_id,
             title: inst.title,
+            kind: inst.kind,
           });
           await ctx.reply("If you want, reply with a reason and I'll pass it to the Doer.");
         }
@@ -630,7 +704,7 @@ export function registerHandlers(
         bot.api,
         store,
         pend.assigneeId,
-        `📝 Reason "${pend.title}" was sent back: ${ctx.message.text}`,
+        `📝 Reason "${pend.title}" was ${pend.kind === "appraisal" ? "declined" : "sent back"}: ${ctx.message.text}`,
       );
       await ctx.reply("Passed your reason along. 👍");
       return;

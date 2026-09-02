@@ -5,6 +5,8 @@ export type Role = "approver" | "doer";
 export type TaskStatus = "assigned" | "submitted" | "approved" | "rejected";
 export type LedgerType = "earning" | "cashout";
 export type ReviewDecision = "approved" | "rejected";
+/** Who created the task: assigned by the approver, or appraised (proposed) by the doer. */
+export type TaskKind = "assigned" | "appraisal";
 
 export interface Profile {
   id: number;
@@ -35,6 +37,7 @@ export interface TaskTemplate {
 export interface TaskInstance {
   id: number;
   template_id: number | null;
+  kind: TaskKind;
   // Snapshots — kept immutable so historic receipts stay accurate even if the
   // template's title/amount changes later.
   title: string;

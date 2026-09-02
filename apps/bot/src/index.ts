@@ -25,6 +25,7 @@ async function main(): Promise<void> {
     { command: "balance", description: "Your balance (Doer)" },
     { command: "cashout", description: "Record a cash-out (Doer)" },
     { command: "receipts", description: "Recent approved tasks (Doer)" },
+    { command: "appraise", description: "Propose a task you did (Doer)" },
     { command: "newtask", description: "New recurring task (Approver)" },
     { command: "assignnow", description: "One-off task now (Approver)" },
     { command: "templates", description: "List recurring tasks (Approver)" },
