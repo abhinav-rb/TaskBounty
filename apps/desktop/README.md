@@ -35,9 +35,13 @@ Then run the migration + seed from [`../../supabase`](../../supabase) and
 
 ## Screens
 
-- **Dashboard** — total transacted, and your balance: *ready to receive* (Doer) or *owed* (Approver).
-- **History** — every task from the last 30 days with status, value, and the proof photo (click to enlarge).
+Styled with the **Organic** design system (`src/renderer/src/organic-tokens.css`) — Caprasimo + Figtree fonts, a terracotta/sage palette, Lucide icons, and a sidebar shell.
+
+- **Dashboard** — role-specific stats; the Approver's review queue (approve / send back with a reason), the Doer's open tasks, and recent activity.
+- **Receipts** — 30 days of tasks with search + status filters, a photo grid ⇄ table toggle, and a detail dialog with the full proof photo.
 - **Recurring tasks** *(Approver only)* — create/edit/pause templates, including the **payment amount** and schedule.
+- **Balance & ledger** — balance card, a 6-week earnings chart, and the append-only ledger.
+- **Settings** — profile, reminders, and account.
 
 ## Scripts
 
