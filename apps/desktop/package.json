@@ -15,7 +15,8 @@
     "dist": "electron-vite build && electron-builder"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4"
+    "@supabase/supabase-js": "^2.45.4",
+    "lucide-react": "^0.460.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.5",

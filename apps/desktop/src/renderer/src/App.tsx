@@ -1,12 +1,28 @@
+import {
+  Check,
+  LayoutDashboard,
+  LogOut,
+  ReceiptText,
+  Repeat,
+  SlidersHorizontal,
+  Wallet,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { currentMode, makeProvider } from "./data/provider";
-import type { Session } from "./data/types";
+import type { Role, Session } from "./data/types";
 import { Dashboard } from "./screens/Dashboard";
-import { History } from "./screens/History";
+import { Ledger } from "./screens/Ledger";
 import { Login } from "./screens/Login";
-import { Templates } from "./screens/Templates";
+import { Receipts } from "./screens/Receipts";
+import { Recurring } from "./screens/Recurring";
+import { Settings } from "./screens/Settings";
 
-type Tab = "dashboard" | "history" | "templates";
+type Screen = "dashboard" | "receipts" | "recurring" | "ledger" | "settings";
+
+function initials(name: string | null, role: Role): string {
+  if (name && name.trim()) return name.trim().slice(0, 2).toUpperCase();
+  return role === "approver" ? "AP" : "DO";
+}
 
 export function App() {
   const { provider, error: configError } = useMemo(() => {
@@ -18,15 +34,16 @@ export function App() {
   }, []);
 
   const [session, setSession] = useState<Session | null>(null);
-  const [tab, setTab] = useState<Tab>("dashboard");
+  const [viewRole, setViewRole] = useState<Role>("doer");
+  const [screen, setScreen] = useState<Screen>("dashboard");
 
   if (configError) {
     return (
-      <div className="login">
-        <div className="card login-card">
-          <h1>TaskBounty</h1>
+      <div className="login-wrap">
+        <div className="card elev-md login-card">
+          <h4>TaskBounty</h4>
           <div className="error">{configError}</div>
-          <p className="muted">
+          <p className="muted small">
             Check your <code>.env</code> file, then restart the app.
           </p>
         </div>
@@ -34,45 +51,85 @@ export function App() {
     );
   }
   if (!provider) return <div />;
-  if (!session) return <Login provider={provider} onLogin={setSession} />;
+  if (!session) {
+    return (
+      <Login
+        provider={provider}
+        onLogin={(s) => {
+          setSession(s);
+          setViewRole(s.role);
+          setScreen("dashboard");
+        }}
+      />
+    );
+  }
+
+  const viewSession: Session = { ...session, role: viewRole };
+  const isApprover = viewRole === "approver";
+
+  function go(s: Screen) {
+    if (s === "recurring" && !isApprover) return;
+    setScreen(s);
+  }
+  function switchRole() {
+    const next: Role = isApprover ? "doer" : "approver";
+    setViewRole(next);
+    if (screen === "recurring" && next !== "approver") setScreen("dashboard");
+  }
+
+  const navItems: { id: Screen; label: string; icon: JSX.Element; show: boolean }[] = [
+    { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} strokeWidth={2.75} />, show: true },
+    { id: "receipts", label: "Receipts", icon: <ReceiptText size={18} strokeWidth={2.75} />, show: true },
+    { id: "recurring", label: "Recurring tasks", icon: <Repeat size={18} strokeWidth={2.75} />, show: isApprover },
+    { id: "ledger", label: isApprover ? "Owed & ledger" : "Balance & cash-out", icon: <Wallet size={18} strokeWidth={2.75} />, show: true },
+    { id: "settings", label: "Settings", icon: <SlidersHorizontal size={18} strokeWidth={2.75} />, show: true },
+  ];
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">TaskBounty</div>
-        <nav className="tabs">
-          <button className={tab === "dashboard" ? "active" : ""} onClick={() => setTab("dashboard")}>
-            Dashboard
-          </button>
-          <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
-            History
-          </button>
-          {session.role === "approver" && (
-            <button className={tab === "templates" ? "active" : ""} onClick={() => setTab("templates")}>
-              Recurring tasks
+    <div className="layout">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <span className="brand-badge"><Check size={18} strokeWidth={2.75} /></span>
+          <span className="brand-name">TaskBounty</span>
+        </div>
+
+        <nav className="side-nav">
+          {navItems.filter((i) => i.show).map((i) => (
+            <button key={i.id} className={`nav-item${screen === i.id ? " active" : ""}`} onClick={() => go(i.id)}>
+              {i.icon}
+              <span>{i.label}</span>
             </button>
-          )}
+          ))}
         </nav>
-        <div className="who">
-          <span>
-            {session.displayName ?? session.role} · {session.role}
-          </span>
-          <button className="link" onClick={() => setSession(null)}>
-            Log out
+
+        <div className="user-patch">
+          <div className="user-row">
+            <span className={`avatar ${viewRole}`}>{initials(session.displayName, viewRole)}</span>
+            <div className="stack">
+              <strong style={{ fontSize: 13 }}>{session.displayName ?? "You"}</strong>
+              <span className="muted" style={{ fontSize: 11 }}>{isApprover ? "Approver" : "Doer"}</span>
+            </div>
+          </div>
+          <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={switchRole}>
+            Switch to {isApprover ? "Doer" : "Approver"}
+          </button>
+          <button className="btn btn-ghost" onClick={() => setSession(null)}>
+            <LogOut size={16} strokeWidth={2.75} /> Sign out
           </button>
         </div>
-      </header>
+      </aside>
 
-      <main className="content">
-        {tab === "dashboard" && <Dashboard provider={provider} session={session} />}
-        {tab === "history" && <History provider={provider} session={session} />}
-        {tab === "templates" && session.role === "approver" && <Templates provider={provider} />}
+      <main className="main">
+        {screen === "dashboard" && <Dashboard provider={provider} session={viewSession} />}
+        {screen === "receipts" && <Receipts provider={provider} session={viewSession} />}
+        {screen === "recurring" && isApprover && <Recurring provider={provider} />}
+        {screen === "ledger" && <Ledger provider={provider} session={viewSession} />}
+        {screen === "settings" && <Settings session={viewSession} onSignOut={() => setSession(null)} />}
+
+        <div className="muted small" style={{ marginTop: "auto", paddingTop: 8 }}>
+          Data mode: {currentMode()}{currentMode() === "mock" ? " — demo data, nothing is saved to a server" : ""}
+        </div>
       </main>
-
-      <footer className="statusbar">
-        Data mode: {currentMode()}
-        {currentMode() === "mock" && " — demo data, nothing is saved to a server"}
-      </footer>
     </div>
   );
 }
