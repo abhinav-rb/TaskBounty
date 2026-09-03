@@ -5,8 +5,8 @@ node_modules/
 # Build output
 dist/
 build/
+out/
 .turbo/
-apps/desktop/src-tauri/target/
 
 # Env / secrets — never commit real values
 .env
@@ -20,8 +20,12 @@ apps/desktop/src-tauri/target/
 .vscode/
 
 # Bot runtime data (SQLite db + downloaded proof photos)
-data/
-apps/*/data/
+# NOTE: anchored/specific so it never matches source folders named `data`.
+/data/
+apps/bot/data/
 *.db
 *.db-wal
 *.db-shm
+
+# TypeScript incremental build info
+*.tsbuildinfo
