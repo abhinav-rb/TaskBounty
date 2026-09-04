@@ -2,9 +2,9 @@ import type { Api } from "grammy";
 import cron from "node-cron";
 import type { ScheduledTask } from "node-cron";
 import type { Config } from "./config.js";
-import type { Store } from "./db.js";
 import { formatMoney } from "./domain.js";
 import { assignFromTemplate, sendToProfile } from "./notify.js";
+import type { Store } from "./store.js";
 import type { TaskTemplate } from "./types.js";
 
 interface Deps {
@@ -24,11 +24,10 @@ export class Scheduler {
 
   constructor(private deps: Deps) {}
 
-  start(): void {
-    for (const t of this.deps.store.listTemplates(true)) {
+  async start(): Promise<void> {
+    for (const t of await this.deps.store.listTemplates(true)) {
       this.registerTemplateJob(t);
     }
-    // Every 30 minutes, remind about overdue tasks.
     this.reminderJob = cron.schedule(
       "*/30 * * * *",
       () => {
@@ -61,7 +60,7 @@ export class Scheduler {
 
   /** Create + announce one instance from a template. Used by cron and by /assign. */
   async fireTemplate(id: number): Promise<boolean> {
-    const t = this.deps.store.getTemplate(id);
+    const t = await this.deps.store.getTemplate(id);
     if (!t) return false;
     try {
       await assignFromTemplate(this.deps.api, this.deps.store, this.deps.config, t);
@@ -74,25 +73,19 @@ export class Scheduler {
 
   async sendReminders(): Promise<void> {
     const nowMs = Date.now();
-    const overdue = this.deps.store.listOverdueAssigned(new Date(nowMs).toISOString());
+    const overdue = await this.deps.store.listOverdueAssigned(new Date(nowMs).toISOString());
     for (const inst of overdue) {
       const last = inst.last_reminded_at ? new Date(inst.last_reminded_at).getTime() : 0;
-      // At most one reminder per task every 6 hours.
       if (nowMs - last < 6 * 3600 * 1000) continue;
       const text =
         `⏰ Reminder: "${inst.title}" is overdue ` +
         `(worth ${formatMoney(inst.amount_cents, this.deps.config.currency)}).\n` +
         `Send a photo here to submit it.`;
-      const delivered = await sendToProfile(
-        this.deps.api,
-        this.deps.store,
-        inst.assignee_id,
-        text,
-      ).catch((err) => {
+      const delivered = await sendToProfile(this.deps.api, this.deps.store, inst.assignee_id, text).catch((err) => {
         console.error("[scheduler] reminder failed:", err);
         return false;
       });
-      if (delivered) this.deps.store.setInstanceReminded(inst.id, new Date().toISOString());
+      if (delivered) await this.deps.store.setInstanceReminded(inst.id, new Date().toISOString());
     }
   }
 

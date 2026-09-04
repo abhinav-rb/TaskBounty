@@ -1,7 +1,7 @@
 import type { Api } from "grammy";
 import type { Config } from "./config.js";
-import type { Store } from "./db.js";
 import { formatMoney } from "./domain.js";
+import type { Store } from "./store.js";
 import type { TaskInstance, TaskTemplate } from "./types.js";
 
 /** Human-readable local timestamp in the configured timezone. */
@@ -20,7 +20,7 @@ export async function sendToProfile(
   profileId: number,
   text: string,
 ): Promise<boolean> {
-  const p = store.getProfileById(profileId);
+  const p = await store.getProfileById(profileId);
   if (!p?.chat_id) return false;
   await api.sendMessage(p.chat_id, text);
   return true;
@@ -53,7 +53,7 @@ export async function assignFromTemplate(
   config: Config,
   tmpl: TaskTemplate,
 ): Promise<TaskInstance> {
-  const inst = store.createInstance({
+  const inst = await store.createInstance({
     template_id: tmpl.id,
     title: tmpl.title,
     description: tmpl.description,

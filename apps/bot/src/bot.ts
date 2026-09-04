@@ -1,10 +1,8 @@
 import { Bot, InlineKeyboard } from "grammy";
 import type { Context } from "grammy";
 import cron from "node-cron";
-import { join } from "node:path";
 import type { Config } from "./config.js";
 import { refMatches } from "./config.js";
-import type { Store } from "./db.js";
 import {
   canReview,
   canSubmit,
@@ -19,8 +17,9 @@ import {
   fmtDate,
   sendToProfile,
 } from "./notify.js";
-import { downloadPhoto } from "./photos.js";
+import { fetchTelegramFileBytes } from "./photos.js";
 import type { Scheduler } from "./scheduler.js";
+import type { Store } from "./store.js";
 import type { Profile, Role, TaskInstance, TaskKind } from "./types.js";
 
 interface Deps {
@@ -59,25 +58,22 @@ export function registerHandlers(
   bot: Bot,
   { store, config, scheduler }: Deps,
 ): void {
-  // In-memory, per-process state (fine for a single bot instance):
-  //  - a photo waiting for the Doer to pick which task it belongs to
-  //  - a rejection waiting for the Approver to (optionally) type a reason
   const pendingPhoto = new Map<number, { fileId: string; note: string | null }>();
   const pendingReject = new Map<
     number,
     { reviewId: number; assigneeId: number; title: string; kind: TaskKind }
   >();
-  // A doer-initiated appraisal awaiting its photo.
   const pendingAppraisal = new Map<
     number,
     { title: string; description: string | null; amount_cents: number }
   >();
 
-  const senderOf = (ctx: Context): Profile | undefined =>
-    ctx.chat ? store.getProfileByChat(ctx.chat.id) : undefined;
+  async function senderOf(ctx: Context): Promise<Profile | undefined> {
+    return ctx.chat ? store.getProfileByChat(ctx.chat.id) : undefined;
+  }
 
   async function requireDoer(ctx: Context): Promise<Profile | undefined> {
-    const p = senderOf(ctx);
+    const p = await senderOf(ctx);
     if (!p) {
       await ctx.reply("Please send /start first.");
       return undefined;
@@ -90,7 +86,7 @@ export function registerHandlers(
   }
 
   async function requireApprover(ctx: Context): Promise<Profile | undefined> {
-    const p = senderOf(ctx);
+    const p = await senderOf(ctx);
     if (!p) {
       await ctx.reply("Please send /start first.");
       return undefined;
@@ -110,25 +106,31 @@ export function registerHandlers(
     fileId: string,
     note: string | null,
   ): Promise<void> {
-    const sub = store.createSubmission({
+    const sub = await store.createSubmission({
       instance_id: inst.id,
       telegram_file_id: fileId,
       photo_path: null,
       note,
     });
-    store.setInstanceStatus(inst.id, "submitted");
+    await store.setInstanceStatus(inst.id, "submitted");
 
-    // Best-effort local copy of the photo.
-    const dest = join(config.dataDir, "photos", `submission-${sub.id}.jpg`);
-    void downloadPhoto(bot.api, config.botToken, fileId, dest)
-      .then(() => store.setSubmissionPhotoPath(sub.id, dest))
-      .catch((err) => console.error("[photo] download failed:", err));
+    // Best-effort: fetch the photo bytes and persist them (local disk or the
+    // Supabase 'proofs' bucket, depending on the store).
+    void (async () => {
+      try {
+        const bytes = await fetchTelegramFileBytes(bot.api, config.botToken, fileId);
+        const path = await store.uploadProof(sub.id, bytes);
+        await store.setSubmissionPhotoPath(sub.id, path);
+      } catch (err) {
+        console.error("[photo] persist failed:", err);
+      }
+    })();
 
     await ctx.reply(
       `✅ Submitted "${inst.title}" for review. You'll hear back once it's approved.`,
     );
 
-    const approver = store.getProfileByRole("approver");
+    const approver = await store.getProfileByRole("approver");
     if (!approver?.chat_id) {
       await ctx.reply(
         "(Heads up: the Approver hasn't started the bot yet, so they can't review this. Ask them to send /start.)",
@@ -152,10 +154,7 @@ export function registerHandlers(
     const kb = new InlineKeyboard()
       .text("✅ Accept", `approve:${sub.id}`)
       .text("❌ Reject", `reject:${sub.id}`);
-    await bot.api.sendPhoto(approver.chat_id, fileId, {
-      caption,
-      reply_markup: kb,
-    });
+    await bot.api.sendPhoto(approver.chat_id, fileId, { caption, reply_markup: kb });
   }
 
   async function clearButtons(ctx: Context, suffix: string): Promise<void> {
@@ -163,7 +162,7 @@ export function registerHandlers(
     try {
       await ctx.editMessageCaption({ caption: `${orig}\n\n${suffix}` });
     } catch {
-      /* message may be too old to edit — ignore */
+      /* too old to edit — ignore */
     }
     try {
       await ctx.editMessageReplyMarkup();
@@ -191,16 +190,15 @@ export function registerHandlers(
       return;
     }
 
-    const profile = store.getProfileByRole(role);
+    const profile = await store.getProfileByRole(role);
     if (!profile) {
       await ctx.reply("Setup error: profile not initialized. Contact the admin.");
       return;
     }
-    store.linkProfileChat(profile.id, {
+    await store.linkProfileChat(profile.id, {
       telegram_id: from.id,
       username: from.username ?? null,
-      display_name:
-        [from.first_name, from.last_name].filter(Boolean).join(" ") || null,
+      display_name: [from.first_name, from.last_name].filter(Boolean).join(" ") || null,
       chat_id: ctx.chat.id,
     });
     await ctx.reply(
@@ -213,7 +211,7 @@ export function registerHandlers(
   bot.command("whoami", async (ctx) => {
     const from = ctx.from;
     if (!from) return;
-    const sender = senderOf(ctx);
+    const sender = await senderOf(ctx);
     const role =
       sender?.role ??
       (refMatches(config.approverRef, from)
@@ -229,13 +227,14 @@ export function registerHandlers(
   });
 
   bot.command("help", async (ctx) => {
-    await ctx.reply(helpFor(senderOf(ctx)?.role));
+    const sender = await senderOf(ctx);
+    await ctx.reply(helpFor(sender?.role));
   });
 
   bot.command("tasks", async (ctx) => {
     const doer = await requireDoer(ctx);
     if (!doer) return;
-    const open = store.listInstancesForAssignee(doer.id, ["assigned", "submitted"]);
+    const open = await store.listInstancesForAssignee(doer.id, ["assigned", "submitted"]);
     if (open.length === 0) {
       await ctx.reply("No open tasks right now. 🎉");
       return;
@@ -246,17 +245,15 @@ export function registerHandlers(
       return `#${t.id} ${t.title} — ${formatMoney(t.amount_cents, config.currency)} · ${status}${due}`;
     });
     await ctx.reply(
-      "Your tasks:\n" +
-        lines.join("\n") +
-        "\n\nSend a photo to submit a task you've finished.",
+      "Your tasks:\n" + lines.join("\n") + "\n\nSend a photo to submit a task you've finished.",
     );
   });
 
   bot.command("balance", async (ctx) => {
     const doer = await requireDoer(ctx);
     if (!doer) return;
-    const bal = store.getBalanceCents(doer.id);
-    const pending = store.listInstancesForAssignee(doer.id, ["submitted"]).length;
+    const bal = await store.getBalanceCents(doer.id);
+    const pending = (await store.listInstancesForAssignee(doer.id, ["submitted"])).length;
     await ctx.reply(
       `💰 Balance ready to cash out: ${formatMoney(bal, config.currency)}` +
         (pending ? `\n⏳ ${pending} task(s) awaiting approval.` : "") +
@@ -267,7 +264,7 @@ export function registerHandlers(
   bot.command("cashout", async (ctx) => {
     const doer = await requireDoer(ctx);
     if (!doer) return;
-    const bal = store.getBalanceCents(doer.id);
+    const bal = await store.getBalanceCents(doer.id);
     if (bal <= 0) {
       await ctx.reply("Nothing to cash out yet.");
       return;
@@ -287,19 +284,17 @@ export function registerHandlers(
       return;
     }
     if (amount > bal) {
-      await ctx.reply(
-        `That's more than your balance (${formatMoney(bal, config.currency)}).`,
-      );
+      await ctx.reply(`That's more than your balance (${formatMoney(bal, config.currency)}).`);
       return;
     }
-    store.addLedgerEntry({
+    await store.addLedgerEntry({
       user_id: doer.id,
       instance_id: null,
       amount_cents: -amount,
       type: "cashout",
       note: "Cash-out (recorded — no real payment in V1)",
     });
-    const newBal = store.getBalanceCents(doer.id);
+    const newBal = await store.getBalanceCents(doer.id);
     await ctx.reply(
       `🧾 Recorded a cash-out of ${formatMoney(amount, config.currency)}.\n` +
         `New balance: ${formatMoney(newBal, config.currency)}\n\n` +
@@ -311,14 +306,13 @@ export function registerHandlers(
     const doer = await requireDoer(ctx);
     if (!doer) return;
     const since = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
-    const rows = store.listApprovedForAssigneeSince(doer.id, since);
+    const rows = await store.listApprovedForAssigneeSince(doer.id, since);
     if (rows.length === 0) {
       await ctx.reply("No approved tasks in the last 30 days yet.");
       return;
     }
     const lines = rows.map(
-      (t) =>
-        `#${t.id} ${t.title} — ${formatMoney(t.amount_cents, config.currency)} · ${fmtDate(t.created_at, config.tz)}`,
+      (t) => `#${t.id} ${t.title} — ${formatMoney(t.amount_cents, config.currency)} · ${fmtDate(t.created_at, config.tz)}`,
     );
     await ctx.reply("🧾 Approved in the last 30 days:\n" + lines.join("\n"));
   });
@@ -348,17 +342,15 @@ export function registerHandlers(
       return;
     }
     if (!cron.validate(cronExpr)) {
-      await ctx.reply(
-        `"${cronExpr}" isn't a valid cron expression. Example: 0 18 * * * (6pm daily).`,
-      );
+      await ctx.reply(`"${cronExpr}" isn't a valid cron expression. Example: 0 18 * * * (6pm daily).`);
       return;
     }
-    const doer = store.getProfileByRole("doer");
+    const doer = await store.getProfileByRole("doer");
     if (!doer) {
       await ctx.reply("Setup error: no Doer configured.");
       return;
     }
-    const tmpl = store.createTemplate({
+    const tmpl = await store.createTemplate({
       title,
       description,
       amount_cents,
@@ -395,12 +387,12 @@ export function registerHandlers(
       await ctx.reply((err as Error).message);
       return;
     }
-    const doer = store.getProfileByRole("doer");
+    const doer = await store.getProfileByRole("doer");
     if (!doer) {
       await ctx.reply("Setup error: no Doer configured.");
       return;
     }
-    const inst = store.createInstance({
+    const inst = await store.createInstance({
       template_id: null,
       title,
       description,
@@ -418,7 +410,7 @@ export function registerHandlers(
   bot.command("templates", async (ctx) => {
     const approver = await requireApprover(ctx);
     if (!approver) return;
-    const list = store.listTemplates();
+    const list = await store.listTemplates();
     if (list.length === 0) {
       await ctx.reply("No recurring tasks yet. Create one with /newtask.");
       return;
@@ -429,9 +421,7 @@ export function registerHandlers(
         `"${t.schedule_cron ?? "manual"}" · ${t.active ? "active" : "paused"}`,
     );
     await ctx.reply(
-      "Recurring tasks:\n" +
-        lines.join("\n") +
-        "\n\n/assign <id> · /pause <id> · /resume <id>",
+      "Recurring tasks:\n" + lines.join("\n") + "\n\n/assign <id> · /pause <id> · /resume <id>",
     );
   });
 
@@ -443,7 +433,7 @@ export function registerHandlers(
       await ctx.reply("Usage: /assign <template id>");
       return;
     }
-    const tmpl = store.getTemplate(id);
+    const tmpl = await store.getTemplate(id);
     if (!tmpl) {
       await ctx.reply(`No template #${id}. See /templates.`);
       return;
@@ -456,11 +446,11 @@ export function registerHandlers(
     const approver = await requireApprover(ctx);
     if (!approver) return;
     const id = Number(ctx.match.trim());
-    if (!store.getTemplate(id)) {
+    if (!(await store.getTemplate(id))) {
       await ctx.reply(`No template #${id}.`);
       return;
     }
-    store.setTemplateActive(id, false);
+    await store.setTemplateActive(id, false);
     scheduler.unregisterTemplateJob(id);
     await ctx.reply(`⏸️ Paused template #${id}.`);
   });
@@ -469,12 +459,12 @@ export function registerHandlers(
     const approver = await requireApprover(ctx);
     if (!approver) return;
     const id = Number(ctx.match.trim());
-    const tmpl = store.getTemplate(id);
+    const tmpl = await store.getTemplate(id);
     if (!tmpl) {
       await ctx.reply(`No template #${id}.`);
       return;
     }
-    store.setTemplateActive(id, true);
+    await store.setTemplateActive(id, true);
     scheduler.registerTemplateJob({ ...tmpl, active: 1 });
     await ctx.reply(`▶️ Resumed template #${id}.`);
   });
@@ -516,7 +506,7 @@ export function registerHandlers(
   // ---- photo submissions -------------------------------------------------
 
   bot.on("message:photo", async (ctx) => {
-    const doer = senderOf(ctx);
+    const doer = await senderOf(ctx);
     if (!doer) {
       await ctx.reply("Please send /start first.");
       return;
@@ -535,12 +525,12 @@ export function registerHandlers(
     const appraisal = ctx.chat ? pendingAppraisal.get(ctx.chat.id) : undefined;
     if (appraisal) {
       if (ctx.chat) pendingAppraisal.delete(ctx.chat.id);
-      const approver = store.getProfileByRole("approver");
+      const approver = await store.getProfileByRole("approver");
       if (!approver) {
         await ctx.reply("Setup error: no Approver configured.");
         return;
       }
-      const inst = store.createInstance({
+      const inst = await store.createInstance({
         template_id: null,
         kind: "appraisal",
         title: appraisal.title,
@@ -554,7 +544,7 @@ export function registerHandlers(
       return;
     }
 
-    const open = store.listInstancesForAssignee(doer.id, ["assigned"]);
+    const open = await store.listInstancesForAssignee(doer.id, ["assigned"]);
     if (open.length === 0) {
       await ctx.reply("You have no open tasks to submit right now. Check /tasks.");
       return;
@@ -575,7 +565,7 @@ export function registerHandlers(
 
   bot.on("callback_query:data", async (ctx) => {
     const [action, arg] = ctx.callbackQuery.data.split(":");
-    const sender = senderOf(ctx);
+    const sender = await senderOf(ctx);
 
     if (action === "submitfor") {
       if (!sender || sender.role !== "doer") {
@@ -587,7 +577,7 @@ export function registerHandlers(
         await ctx.answerCallbackQuery("That photo expired — please send it again.");
         return;
       }
-      const inst = store.getInstance(Number(arg));
+      const inst = await store.getInstance(Number(arg));
       if (!inst || inst.assignee_id !== sender.id || !canSubmit(inst.status)) {
         await ctx.answerCallbackQuery("That task isn't open.");
         return;
@@ -604,12 +594,12 @@ export function registerHandlers(
     }
 
     if (action === "approve" || action === "reject") {
-      const sub = store.getSubmission(Number(arg));
+      const sub = await store.getSubmission(Number(arg));
       if (!sub) {
         await ctx.answerCallbackQuery("That submission no longer exists.");
         return;
       }
-      const inst = store.getInstance(sub.instance_id);
+      const inst = await store.getInstance(sub.instance_id);
       if (!inst) {
         await ctx.answerCallbackQuery("Task not found.");
         return;
@@ -625,21 +615,16 @@ export function registerHandlers(
       const isAppraisal = inst.kind === "appraisal";
 
       if (action === "approve") {
-        store.createReview({
-          submission_id: sub.id,
-          approver_id: sender.id,
-          decision: "approved",
-          note: null,
-        });
-        store.setInstanceStatus(inst.id, statusAfterReview("approved", inst.kind));
-        store.addLedgerEntry({
+        await store.createReview({ submission_id: sub.id, approver_id: sender.id, decision: "approved", note: null });
+        await store.setInstanceStatus(inst.id, statusAfterReview("approved", inst.kind));
+        await store.addLedgerEntry({
           user_id: inst.assignee_id,
           instance_id: inst.id,
           amount_cents: inst.amount_cents,
           type: "earning",
           note: `${isAppraisal ? "Appraisal" : "Task"} #${inst.id}: ${inst.title}`,
         });
-        const bal = store.getBalanceCents(inst.assignee_id);
+        const bal = await store.getBalanceCents(inst.assignee_id);
         await ctx.answerCallbackQuery("Approved ✅");
         await clearButtons(ctx, isAppraisal ? "💡 Appraisal approved" : "✅ Approved");
         await sendToProfile(
@@ -651,18 +636,10 @@ export function registerHandlers(
             `Balance: ${formatMoney(bal, config.currency)}`,
         );
       } else {
-        const review = store.createReview({
-          submission_id: sub.id,
-          approver_id: sender.id,
-          decision: "rejected",
-          note: null,
-        });
-        store.setInstanceStatus(inst.id, statusAfterReview("rejected", inst.kind));
+        const review = await store.createReview({ submission_id: sub.id, approver_id: sender.id, decision: "rejected", note: null });
+        await store.setInstanceStatus(inst.id, statusAfterReview("rejected", inst.kind));
         await ctx.answerCallbackQuery(isAppraisal ? "Declined 🚫" : "Sent back ↩️");
-        await clearButtons(
-          ctx,
-          isAppraisal ? "🚫 Declined" : "❌ Rejected — sent back to the Doer",
-        );
+        await clearButtons(ctx, isAppraisal ? "🚫 Declined" : "❌ Rejected — sent back to the Doer");
         await sendToProfile(
           bot.api,
           store,
@@ -691,7 +668,7 @@ export function registerHandlers(
 
   bot.on("message:text", async (ctx) => {
     if (ctx.message.text.startsWith("/")) return; // unmatched command
-    const sender = senderOf(ctx);
+    const sender = await senderOf(ctx);
     if (!sender) {
       await ctx.reply("Please send /start to begin.");
       return;
@@ -699,7 +676,7 @@ export function registerHandlers(
     const pend = ctx.chat ? pendingReject.get(ctx.chat.id) : undefined;
     if (sender.role === "approver" && pend && ctx.chat) {
       pendingReject.delete(ctx.chat.id);
-      store.updateReviewNote(pend.reviewId, ctx.message.text);
+      await store.updateReviewNote(pend.reviewId, ctx.message.text);
       await sendToProfile(
         bot.api,
         store,
