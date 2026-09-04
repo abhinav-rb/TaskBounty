@@ -4,11 +4,16 @@ The messaging half of TaskBounty: assign tasks, collect **photo proof**, get an
 approver's **Accept/Reject**, and track a **cash-out balance** — all inside
 Telegram, all free to run.
 
-> **Storage note:** for V1 this runs on a local **SQLite** database (file under
-> `DATA_DIR`) so it works with nothing but a free bot token. The database access
-> lives entirely in [`src/db.ts`](src/db.ts) behind a small method surface, so
-> when the desktop app arrives it can be swapped for Supabase without touching
-> the bot logic.
+> **Storage — two backends behind one interface** ([`src/store.ts`](src/store.ts)):
+> - **SQLite (default)** — local file under `DATA_DIR`, works with nothing but a
+>   free bot token. Great for solo dev.
+> - **Supabase** — set `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` and the bot shares
+>   one cloud datastore with the **desktop app**: proof photos upload to the
+>   `proofs` bucket, and the bot **delivers the app's login codes over Telegram**
+>   (it watches the `login_codes` table). Run `supabase/migrations` + `seed.sql`
+>   first. The service_role key is server-side only — never ship it in the app.
+>
+> The bot logic depends only on the `Store` interface, so switching is one env var.
 
 ## Quick start
 

@@ -10,6 +10,10 @@ export interface Config {
   defaultDueHours: number;
   dataDir: string;
   dbPath: string;
+  /** When both are set, the bot uses Supabase (shared with the desktop app)
+   *  instead of local SQLite. */
+  supabaseUrl?: string;
+  supabaseServiceKey?: string;
 }
 
 function required(name: string): string {
@@ -49,5 +53,7 @@ export function loadConfig(): Config {
     defaultDueHours: Number.isFinite(dueHours) && dueHours > 0 ? dueHours : 12,
     dataDir,
     dbPath: join(dataDir, "taskbounty.db"),
+    supabaseUrl: process.env.SUPABASE_URL?.trim() || undefined,
+    supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY?.trim() || undefined,
   };
 }

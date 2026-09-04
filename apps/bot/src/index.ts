@@ -1,21 +1,36 @@
 import { Bot } from "grammy";
+import { join } from "node:path";
 import { registerHandlers } from "./bot.js";
 import { loadConfig } from "./config.js";
-import { Store } from "./db.js";
+import { SqliteStore } from "./db.js";
+import { LoginCodePoller } from "./login-poller.js";
 import { Scheduler } from "./scheduler.js";
+import type { Store } from "./store.js";
+import { SupabaseStore } from "./supabase-store.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const store = new Store(config.dbPath);
+  const useSupabase = Boolean(config.supabaseUrl && config.supabaseServiceKey);
+
+  const store: Store = useSupabase
+    ? new SupabaseStore(config.supabaseUrl!, config.supabaseServiceKey!)
+    : new SqliteStore(config.dbPath, join(config.dataDir, "photos"));
 
   // Ensure both participant rows exist so templates/instances can reference them
   // even before each user has run /start.
-  store.seedProfile("approver", config.approverRef);
-  store.seedProfile("doer", config.doerRef);
+  await store.seedProfile("approver", config.approverRef);
+  await store.seedProfile("doer", config.doerRef);
 
   const bot = new Bot(config.botToken);
   const scheduler = new Scheduler({ store, config, api: bot.api });
   registerHandlers(bot, { store, config, scheduler });
+
+  // In Supabase mode, deliver desktop-app login codes over Telegram.
+  let poller: LoginCodePoller | undefined;
+  if (useSupabase) {
+    poller = new LoginCodePoller(config.supabaseUrl!, config.supabaseServiceKey!, store, bot.api);
+    poller.start();
+  }
 
   await bot.api.setMyCommands([
     { command: "start", description: "Link your account" },
@@ -34,22 +49,22 @@ async function main(): Promise<void> {
     { command: "resume", description: "Resume a recurring task (Approver)" },
   ]);
 
-  scheduler.start();
+  await scheduler.start();
 
   const stop = () => {
     console.log("\nShutting down…");
     scheduler.stop();
+    poller?.stop();
     void bot.stop();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
   console.log(
-    `TaskBounty bot starting (tz=${config.tz}, currency=${config.currency})…`,
+    `TaskBounty bot starting (store=${useSupabase ? "supabase" : "sqlite"}, tz=${config.tz}, currency=${config.currency})…`,
   );
   await bot.start({
-    onStart: (me) =>
-      console.log(`Bot @${me.username} is live. Press Ctrl+C to stop.`),
+    onStart: (me) => console.log(`Bot @${me.username} is live. Press Ctrl+C to stop.`),
   });
 }
 
